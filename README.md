@@ -63,3 +63,7 @@ Press **Ctrl+C** to quit. It clears your About on the way out.
 - **Idle:** if the terminal has no input (closed stdin) it still goes idle, just without asking for a message.
 - **Privacy:** the login session lives in `.wwebjs_auth/`. Never commit or share it; it's already in `.gitignore`.
 - **`npm audit`:** reports vulnerabilities in transitive dependencies of whatsapp-web.js (Puppeteer's download and archive tooling). They aren't reachable here since no browser is downloaded and no FTP or zip handling is used.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

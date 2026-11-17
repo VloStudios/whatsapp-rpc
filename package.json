@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "keywords": ["whatsapp", "rich-presence", "now-playing", "spotify", "windows"],
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "os": ["win32"],
   "dependencies": {
