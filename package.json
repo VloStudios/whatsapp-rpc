@@ -1,0 +1,17 @@
+{
+  "name": "whatsapp-rpc",
+  "version": "1.0.0",
+  "description": "Mirror what you're listening to (Spotify, YT Music, SoundCloud, Apple Music...) into your WhatsApp About text, like Discord Rich Presence.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["whatsapp", "rich-presence", "now-playing", "spotify", "windows"],
+  "license": "ISC",
+  "type": "commonjs",
+  "os": ["win32"],
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.8"
+  }
+}
