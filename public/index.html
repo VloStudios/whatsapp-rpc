@@ -51,6 +51,10 @@
   .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 12px; }
 
   .idle-row { display: flex; gap: 8px; }
+  select, input[type=time] {
+    font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 10px; min-width: 0;
+  }
   input[type=text], input[type=number] {
     font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
     border-radius: 9px; padding: 8px 10px; min-width: 0;
@@ -82,6 +86,37 @@
   .log li.error { color: var(--bad); }
   .log time { opacity: .7; margin-right: 6px; }
 
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { border-radius: 999px; padding: 6px 12px; background: var(--bg); }
+  .chip.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+  .chips.small .chip { padding: 3px 10px; font-size: 12px; }
+  .activebar { background: var(--bubble); border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; }
+  .activebar .at { font-weight: 600; margin-bottom: 8px; word-break: break-word; }
+  .pending { border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; margin-top: 12px; }
+  .pending .q { margin-bottom: 8px; }
+  .pending .chips { margin-top: 8px; }
+  details.manage { margin-top: 12px; }
+  .mrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); }
+  .mrow:first-of-type { border-top: 0; }
+  .mrow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mrow button { padding: 2px 10px; }
+  #newEmoji { flex: none; width: 56px; text-align: center; }
+  .cardhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .cardhead h2 { margin: 0; }
+  .autobar { border: 1px dashed var(--accent); border-radius: 12px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+  .arow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .arow:first-child { border-top: 0; padding-top: 0; }
+  .arow .atext { flex: 1; min-width: 0; }
+  .arow .atext b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .arow .atext small { color: var(--muted); }
+  .arow.off .atext { opacity: .5; }
+  .arow button { padding: 2px 10px; }
+  .live { color: var(--accent); font-size: 12px; font-weight: 600; margin-left: 6px; }
+  .field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+  .field select, .field input[type=text] { color: var(--text); font-size: 14px; }
+  .days { display: flex; gap: 6px; flex-wrap: wrap; }
+  .days .chip { padding: 5px 10px; font-size: 13px; }
+  .times { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   footer { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; color: var(--muted); font-size: 12px; }
   .offline { position: fixed; inset: auto 16px 16px; background: var(--bad); color: #fff; padding: 10px 14px; border-radius: 10px; text-align: center; }
 </style>
@@ -113,6 +148,68 @@
       </div>
       <span class="badge" id="platform" hidden></span>
     </div>
+  </section>
+
+  <section class="card" id="statusCard">
+    <h2>Status</h2>
+    <div class="autobar" id="autoBar" hidden></div>
+    <div class="activebar" id="activeBar" hidden>
+      <div class="at" id="activeText"></div>
+      <div class="idle-row">
+        <input type="text" id="activeInput" maxlength="80" autocomplete="off">
+        <button class="primary" id="activeUpdate">Update</button>
+        <button id="activeClear">Clear</button>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="pending" id="pending" hidden>
+      <div class="q" id="pendingQ"></div>
+      <div class="idle-row">
+        <input type="text" id="pendingInput" maxlength="80" autocomplete="off">
+        <button class="primary" id="pendingSet">Set</button>
+        <button id="pendingCancel">Cancel</button>
+      </div>
+      <div class="chips small" id="recents"></div>
+    </div>
+    <p class="hint">A status replaces the music text until you clear it.</p>
+    <details class="manage">
+      <summary>Manage statuses</summary>
+      <div id="manageList"></div>
+      <div class="idle-row" style="margin-top:10px">
+        <input type="text" id="newEmoji" maxlength="8" placeholder="🙂" aria-label="Emoji">
+        <input type="text" id="newTemplate" maxlength="40" placeholder="Name, e.g. Reading or Playing {}" aria-label="Status name" autocomplete="off">
+        <button class="primary" id="addStatus">Add</button>
+      </div>
+      <p class="hint">Use <b>{}</b> where you want to type something each time, e.g. “Playing {}” for games. Press <b>Win + .</b> to pick an emoji.</p>
+      <button class="ghost" id="resetStatuses">Reset to defaults</button>
+    </details>
+  </section>
+
+  <section class="card" id="autoCard">
+    <div class="cardhead">
+      <h2>Automations</h2>
+      <label class="switch" title="Run automations"><input type="checkbox" id="automationsEnabled" aria-label="Run automations"><span class="track"></span></label>
+    </div>
+    <div id="autoList"></div>
+    <p class="hint" id="autoEmpty">No automations yet. Add one to switch a status on by itself on certain days and hours.</p>
+    <details class="manage">
+      <summary>Add automation</summary>
+      <label class="field">Status
+        <select id="autoStatus"></select>
+      </label>
+      <label class="field"><span id="autoInputLbl">Note (optional)</span>
+        <input type="text" id="autoInput" maxlength="80" autocomplete="off">
+      </label>
+      <div class="field">Days
+        <div class="days" id="autoDays"></div>
+        <div class="chips small" id="autoPresets"></div>
+      </div>
+      <div class="field">Time
+        <div class="times">From <input type="time" id="autoStart" value="09:00"> to <input type="time" id="autoEnd" value="17:00"></div>
+      </div>
+      <div class="idle-row" style="margin-top:12px"><button class="primary" id="autoAddBtn">Add automation</button></div>
+      <p class="hint">Overnight works too: 22:00 → 07:00 runs from that evening into the next morning. If several match, the first in the list wins. A status you pick yourself always overrides an automation.</p>
+    </details>
   </section>
 
   <section class="card" id="idleCard" hidden>
@@ -181,7 +278,8 @@
       });
       const j = await r.json();
       if (!j.ok) alert(j.error);
-    } catch { /* offline banner handles it */ }
+      return !!j.ok;
+    } catch { return false; /* offline banner handles it */ }
   }
 
   const STATUS = {
@@ -206,7 +304,9 @@
     $('platform').hidden = !(m.playing && m.platform);
     $('platform').textContent = m.platform || '';
 
-    $('idleCard').hidden = !s.idle.active;
+    $('idleCard').hidden = !(s.idle.active && !s.status);
+    renderStatus();
+    renderAutomations();
     if (s.idle.active && !focused($('idleMsg'))) $('idleMsg').value = s.idle.message || '';
 
     const shown = s.about.hasDesired ? s.about.desired : s.about.applied;
@@ -243,6 +343,182 @@
     $('sync').textContent = msg;
   }
   setInterval(renderSync, 1000);
+
+  // ---- statuses
+  let pendingId = null;
+  const hasSlot = (st) => st.template.includes('{}');
+  const label = (st) => `${st.emoji} ${st.template.replace('{}', '…')}`;
+
+  function renderStatus() {
+    const list = state.settings.statuses || [];
+    const active = state.status;
+
+    $('chips').innerHTML = '';
+    for (const st of list) {
+      const b = document.createElement('button');
+      b.className = 'chip' + (active && active.id === st.id ? ' on' : '');
+      b.textContent = label(st);
+      b.onclick = () => {
+        if (hasSlot(st)) { pendingId = st.id; $('pendingInput').value = ''; renderStatus(); $('pendingInput').focus(); }
+        else if (active && active.id === st.id) act({ type: 'clearStatus' });
+        else { pendingId = null; renderStatus(); act({ type: 'setStatus', id: st.id }); }
+      };
+      $('chips').append(b);
+    }
+
+    // active status bar
+    $('activeBar').hidden = !active;
+    if (active) {
+      const st = list.find((x) => x.id === active.id);
+      $('activeText').textContent = active.text;
+      $('activeInput').placeholder = st && hasSlot(st) ? 'Change it…' : 'Add a note (optional)';
+      if (document.activeElement !== $('activeInput')) $('activeInput').value = active.input || '';
+    }
+
+    // fill-in-the-blank panel (e.g. which game)
+    const pend = list.find((x) => x.id === pendingId);
+    $('pending').hidden = !pend;
+    if (pend) {
+      $('pendingQ').textContent = `${pend.emoji} ${pend.template.replace('{}', '____')}`;
+      $('pendingInput').placeholder = 'Type it in…';
+      $('recents').innerHTML = '';
+      for (const r of pend.recents || []) {
+        const b = document.createElement('button');
+        b.className = 'chip'; b.textContent = r;
+        b.onclick = async () => { if (await act({ type: 'setStatus', id: pend.id, input: r })) { pendingId = null; renderStatus(); } };
+        $('recents').append(b);
+      }
+    }
+
+    // manage list
+    if (!$('manageList').contains(document.activeElement)) {
+      $('manageList').innerHTML = '';
+      for (const st of list) {
+        const row = document.createElement('div'); row.className = 'mrow';
+        const sp = document.createElement('span'); sp.textContent = label(st);
+        const rm = document.createElement('button'); rm.textContent = 'Remove';
+        rm.onclick = () => act({ type: 'removeStatus', id: st.id });
+        row.append(sp, rm); $('manageList').append(row);
+      }
+    }
+  }
+
+  const setPending = async () => {
+    if (await act({ type: 'setStatus', id: pendingId, input: $('pendingInput').value })) { pendingId = null; renderStatus(); }
+  };
+  $('pendingSet').onclick = setPending;
+  $('pendingInput').onkeydown = (e) => { if (e.key === 'Enter') setPending(); };
+  $('pendingCancel').onclick = () => { pendingId = null; renderStatus(); };
+  const updateActive = () => act({ type: 'setStatus', id: state.status.id, input: $('activeInput').value });
+  $('activeUpdate').onclick = updateActive;
+  $('activeInput').onkeydown = (e) => { if (e.key === 'Enter') updateActive(); };
+  $('activeClear').onclick = () => act({ type: 'clearStatus' });
+  const addStatus = async () => {
+    if (await act({ type: 'addStatus', emoji: $('newEmoji').value, template: $('newTemplate').value })) {
+      $('newEmoji').value = ''; $('newTemplate').value = '';
+    }
+  };
+  $('addStatus').onclick = addStatus;
+  $('newTemplate').onkeydown = (e) => { if (e.key === 'Enter') addStatus(); };
+  $('resetStatuses').onclick = () => { if (confirm('Reset statuses to the defaults?')) act({ type: 'resetStatuses' }); };
+
+  // ---- automations
+  const DAYS = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
+  const DAY_PRESETS = [['Every day', [0, 1, 2, 3, 4, 5, 6]], ['Weekdays', [1, 2, 3, 4, 5]], ['Weekends', [6, 0]]];
+  let selDays = new Set([1, 2, 3, 4, 5]);
+
+  const statusLabel = (st, input) => st.template.includes('{}')
+    ? `${st.emoji} ${st.template.replace('{}', input || '…')}`
+    : `${st.emoji} ${st.template}${input ? ' - ' + input : ''}`;
+
+  function dayLabel(days) {
+    const key = [...days].sort().join(',');
+    if (key === '0,1,2,3,4,5,6') return 'Every day';
+    if (key === '1,2,3,4,5') return 'Weekdays';
+    if (key === '0,6') return 'Weekends';
+    return DAYS.filter(([d]) => days.includes(d)).map(([, n]) => n).join(', ');
+  }
+
+  function renderDayButtons() {
+    $('autoDays').innerHTML = '';
+    for (const [d, name] of DAYS) {
+      const b = document.createElement('button');
+      b.className = 'chip' + (selDays.has(d) ? ' on' : '');
+      b.textContent = name;
+      b.onclick = () => { selDays.has(d) ? selDays.delete(d) : selDays.add(d); renderDayButtons(); };
+      $('autoDays').append(b);
+    }
+  }
+  $('autoPresets').innerHTML = '';
+  for (const [name, days] of DAY_PRESETS) {
+    const b = document.createElement('button');
+    b.className = 'chip'; b.textContent = name;
+    b.onclick = () => { selDays = new Set(days); renderDayButtons(); };
+    $('autoPresets').append(b);
+  }
+  renderDayButtons();
+
+  function renderAutomations() {
+    const set = state.settings;
+    const sts = set.statuses || [];
+    const list = set.automations || [];
+    const live = state.autoStatus;
+
+    // banner in the Status card
+    $('autoBar').hidden = !live;
+    if (live) $('autoBar').textContent = state.status
+      ? `⏰ Automation would show “${live.text}” (until ${live.until}) — your own status is overriding it.`
+      : `⏰ Automation: “${live.text}” until ${live.until}. Pick a status to override it.`;
+
+    if (!focused($('automationsEnabled'))) $('automationsEnabled').checked = set.automationsEnabled !== false;
+
+    $('autoEmpty').hidden = list.length > 0;
+    if (!$('autoList').contains(document.activeElement)) {
+      $('autoList').innerHTML = '';
+      for (const a of list) {
+        const st = sts.find((s) => s.id === a.statusId);
+        if (!st) continue;
+        const row = document.createElement('div');
+        row.className = 'arow' + (a.enabled ? '' : ' off');
+        const sw = document.createElement('label'); sw.className = 'switch';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = a.enabled;
+        cb.setAttribute('aria-label', 'Enable automation');
+        cb.onchange = () => act({ type: 'toggleAutomation', id: a.id, enabled: cb.checked });
+        const tr = document.createElement('span'); tr.className = 'track';
+        sw.append(cb, tr);
+        const tx = document.createElement('div'); tx.className = 'atext';
+        const b = document.createElement('b'); b.textContent = statusLabel(st, a.input);
+        if (live && live.automationId === a.id) { const l = document.createElement('span'); l.className = 'live'; l.textContent = '● live'; b.append(l); }
+        const sm = document.createElement('small'); sm.textContent = `${dayLabel(a.days)} · ${a.start}–${a.end}`;
+        tx.append(b, sm);
+        const rm = document.createElement('button'); rm.textContent = 'Remove';
+        rm.onclick = () => act({ type: 'removeAutomation', id: a.id });
+        row.append(sw, tx, rm);
+        $('autoList').append(row);
+      }
+    }
+
+    // status picker in the add form (keep the current choice while you're editing)
+    const sel = $('autoStatus');
+    if (document.activeElement !== sel) {
+      const prev = sel.value;
+      sel.innerHTML = '';
+      for (const st of sts) { const o = document.createElement('option'); o.value = st.id; o.textContent = statusLabel(st, ''); sel.append(o); }
+      if (sts.some((s) => s.id === prev)) sel.value = prev;
+    }
+    const cur = sts.find((s) => s.id === sel.value);
+    $('autoInputLbl').textContent = cur && cur.template.includes('{}') ? 'Fill in the blank (e.g. which game / what)' : 'Note (optional)';
+  }
+
+  $('autoStatus').onchange = renderAutomations;
+  $('autoAddBtn').onclick = async () => {
+    const ok = await act({
+      type: 'addAutomation', statusId: $('autoStatus').value, input: $('autoInput').value,
+      days: [...selDays], start: $('autoStart').value, end: $('autoEnd').value,
+    });
+    if (ok) $('autoInput').value = '';
+  };
+  $('automationsEnabled').onchange = (e) => act({ type: 'updateSettings', settings: { automationsEnabled: e.target.checked } });
 
   // controls
   $('enabled').onchange = (e) => act({ type: 'setEnabled', value: e.target.checked });

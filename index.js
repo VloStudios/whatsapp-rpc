@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { startGui } = require('./gui');
@@ -13,26 +14,102 @@ const MAX_LEN = 139;                  // WhatsApp About limit
 const CLEAR = '\u0000clear';          // sentinel: clear the About text
 
 // ---------------------------------------------------------------- settings (saved to settings.json)
-const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+const SETTINGS_FILE = process.env.SETTINGS_FILE || path.join(__dirname, 'settings.json');
 const DEFAULT_SETTINGS = {
   idleEnabled: true,
   idleAfterSeconds: Number(process.env.IDLE_AFTER_SECONDS || 30),
   minIntervalSeconds: Number(process.env.MIN_INTERVAL_SECONDS || 20),
   showPlatform: true,
   defaultBrowserPlatform: process.env.DEFAULT_BROWSER_PLATFORM || '',
+  statuses: null, // null = never set -> starter list below; managed via the status actions, not the settings form
+  automationsEnabled: true,
+  automations: [], // [{id, statusId, input, days:[0-6, 0=Sunday], start:'HH:MM', end:'HH:MM', enabled}]
 };
+
+// Manual statuses. `template` may contain {} = something you type each time (e.g. "Playing {}" -> a game).
+// Without {}, you can add an optional note: "💻 Coding - project X". `recents` remembers past {} answers.
+const DEFAULT_STATUSES = [
+  { emoji: '💻', template: 'Coding' },
+  { emoji: '🎮', template: 'Playing {}' },
+  { emoji: '🍿', template: 'Watching {}' },
+  { emoji: '😴', template: 'Sleeping' },
+  { emoji: '🏫', template: 'School' },
+  { emoji: '📚', template: 'Studying' },
+  { emoji: '💼', template: 'Working' },
+  { emoji: '🍽️', template: 'Eating' },
+  { emoji: '🏋️', template: 'At the gym' },
+  { emoji: '🚗', template: 'Driving' },
+];
+const newId = () => crypto.randomBytes(4).toString('hex');
+const defaultStatuses = () => DEFAULT_STATUSES.map((s) => ({ id: newId(), ...s, recents: [] }));
+
+function sanitizeStatuses(list) {
+  if (!Array.isArray(list)) return defaultStatuses();
+  return list
+    .filter((s) => s && typeof s.id === 'string' && typeof s.emoji === 'string' && typeof s.template === 'string' && s.template.trim())
+    .slice(0, 30)
+    .map((s) => ({
+      id: s.id.slice(0, 16),
+      emoji: [...s.emoji].slice(0, 8).join('') || '🙂',
+      template: s.template.trim().slice(0, 40),
+      recents: Array.isArray(s.recents) ? s.recents.filter((r) => typeof r === 'string').slice(0, 8) : [],
+    }));
+}
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+function sanitizeAutomations(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((a) => a && typeof a.id === 'string' && typeof a.statusId === 'string' && Array.isArray(a.days)
+      && TIME_RE.test(a.start) && TIME_RE.test(a.end) && a.start !== a.end)
+    .slice(0, 50)
+    .map((a) => ({
+      id: a.id.slice(0, 16),
+      statusId: a.statusId,
+      input: String(a.input || '').slice(0, 80),
+      days: [...new Set(a.days.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort(),
+      start: a.start,
+      end: a.end,
+      enabled: a.enabled !== false,
+    }))
+    .filter((a) => a.days.length);
+}
+
 let settings = { ...DEFAULT_SETTINGS };
 try { settings = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch { /* first run */ }
+settings.statuses = sanitizeStatuses(settings.statuses);
+
+function saveSettings() {
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch { /* not fatal */ }
+}
+
+// One-time migrations of the saved status list (never removes anything):
+//  v1: an early build saved an empty list, hiding the starter statuses
+//  v2: "Watching {}" joined the starter set
+// Add any starter statuses that are missing next to the custom ones.
+if ((settings.statusesVersion || 0) < 2) {
+  const have = new Set(settings.statuses.map((s) => s.template.toLowerCase()));
+  settings.statuses = [...settings.statuses, ...defaultStatuses().filter((d) => !have.has(d.template.toLowerCase()))].slice(0, 30);
+  settings.statusesVersion = 2;
+  saveSettings();
+}
+
+// Automations only make sense for statuses that still exist
+const pruneAutomations = () => {
+  settings.automations = sanitizeAutomations(settings.automations).filter((a) => settings.statuses.some((s) => s.id === a.statusId));
+};
+pruneAutomations();
 
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(n)) || lo));
 function applySettings(patch) {
   if ('idleEnabled' in patch) settings.idleEnabled = !!patch.idleEnabled;
   if ('showPlatform' in patch) settings.showPlatform = !!patch.showPlatform;
+  if ('automationsEnabled' in patch) settings.automationsEnabled = !!patch.automationsEnabled;
   if ('idleAfterSeconds' in patch) settings.idleAfterSeconds = clamp(patch.idleAfterSeconds, 5, 3600);
   // floor of 10s protects the account from looking like a bot
   if ('minIntervalSeconds' in patch) settings.minIntervalSeconds = clamp(patch.minIntervalSeconds, 10, 600);
   if ('defaultBrowserPlatform' in patch) settings.defaultBrowserPlatform = String(patch.defaultBrowserPlatform || '').trim().slice(0, 30);
-  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch { /* not fatal */ }
+  saveSettings();
 }
 
 // ---------------------------------------------------------------- app state
@@ -41,6 +118,8 @@ let enabled = true;                          // master sync switch
 let media = { playing: false };
 let idle = { active: false, message: '' };
 let cleared = false;                         // idle mode off + grace period over -> About cleared
+let activeStatus = null;                     // manual status {id, input, text}; overrides everything below
+let autoStatus = null;                       // status from a matching automation {automationId, statusId, text, until}
 let desired = null;                          // what About should say (null = nothing to push yet)
 let applied = null;                          // what we last actually set
 let lastSet = 0;
@@ -67,6 +146,8 @@ function getState() {
     enabled,
     media: { playing: !!media.playing, title: media.title || null, artist: media.artist || null, platform: media.platform || null },
     idle,
+    status: activeStatus,
+    autoStatus,
     about: {
       desired: show(desired), applied: show(applied), hasDesired: desired !== null,
       pending: desired !== null && desired !== applied, nextUpdateAt,
@@ -143,8 +224,18 @@ function idleText(msg) {
   return text.length > MAX_LEN ? text.slice(0, MAX_LEN - 1) + '…' : text;
 }
 
+// "💻 Coding - note" or "🎮 Playing Minecraft"
+function statusText(st, input) {
+  const hasSlot = st.template.includes('{}');
+  const label = hasSlot ? st.template.replace('{}', input) : st.template + (input ? ' - ' + input : '');
+  const text = `${st.emoji} ${label}`;
+  return text.length > MAX_LEN ? text.slice(0, MAX_LEN - 1) + '…' : text;
+}
+
 function computeDesired() {
   if (!enabled) return CLEAR;
+  if (activeStatus) return activeStatus.text;     // manual wins over automations
+  if (autoStatus) return autoStatus.text;
   if (idle.active) return idleText(idle.message);
   if (media.playing && media.title) return format(media);
   if (cleared) return CLEAR;
@@ -211,7 +302,7 @@ ps.stdout.on('data', (chunk) => {
 ps.stderr.on('data', (d) => log(`[media] ${d.toString().trim()}`, 'error'));
 
 // ---------------------------------------------------------------- actions from the GUI
-async function onAction(a) {
+async function handleAction(a) {
   switch (a && a.type) {
     case 'setIdleMessage': {
       if (!idle.active) throw new Error('You\'re not idle right now');
@@ -231,12 +322,128 @@ async function onAction(a) {
       refresh();
       return;
     }
+    case 'setStatus': {
+      const st = settings.statuses.find((s) => s.id === a.id);
+      if (!st) throw new Error('Unknown status');
+      const hasSlot = st.template.includes('{}');
+      const input = String(a.input || '').trim().slice(0, 80);
+      if (hasSlot && !input) throw new Error(`Fill in the blank for "${st.template}"`);
+      if (hasSlot) { // remember recent answers (e.g. games), newest first
+        st.recents = [input, ...st.recents.filter((r) => r.toLowerCase() !== input.toLowerCase())].slice(0, 8);
+        saveSettings();
+      }
+      activeStatus = { id: st.id, input, text: statusText(st, input) };
+      log(`Status: ${activeStatus.text}`);
+      refresh();
+      return;
+    }
+    case 'clearStatus':
+      if (activeStatus) { activeStatus = null; log('Status cleared'); }
+      refresh();
+      return;
+    case 'addStatus': {
+      const emoji = [...String(a.emoji || '').trim()].slice(0, 8).join('');
+      const template = String(a.template || '').trim().slice(0, 40);
+      if (!emoji || !template) throw new Error('Give it an emoji and a name');
+      if (settings.statuses.length >= 30) throw new Error('Too many statuses (max 30)');
+      settings.statuses.push({ id: newId(), emoji, template, recents: [] });
+      saveSettings();
+      emit();
+      return;
+    }
+    case 'removeStatus': {
+      settings.statuses = settings.statuses.filter((s) => s.id !== a.id);
+      if (activeStatus && activeStatus.id === a.id) activeStatus = null;
+      pruneAutomations();
+      saveSettings();
+      refresh();
+      return;
+    }
+    case 'resetStatuses':
+      settings.statuses = defaultStatuses();
+      activeStatus = null;
+      pruneAutomations(); // ids changed, so old automations no longer point at anything
+      saveSettings();
+      refresh();
+      return;
+    case 'addAutomation': {
+      const st = settings.statuses.find((s) => s.id === a.statusId);
+      if (!st) throw new Error('Pick a status');
+      const input = String(a.input || '').trim().slice(0, 80);
+      if (st.template.includes('{}') && !input) throw new Error(`Fill in the blank for "${st.template}"`);
+      const days = [...new Set((Array.isArray(a.days) ? a.days : []).map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort();
+      if (!days.length) throw new Error('Pick at least one day');
+      if (!TIME_RE.test(a.start) || !TIME_RE.test(a.end)) throw new Error('Pick a start and end time');
+      if (a.start === a.end) throw new Error('Start and end time can\'t be the same');
+      if (settings.automations.length >= 50) throw new Error('Too many automations (max 50)');
+      settings.automations.push({ id: newId(), statusId: st.id, input, days, start: a.start, end: a.end, enabled: true });
+      saveSettings();
+      log(`Automation added: ${statusText(st, input)} ${a.start}–${a.end}`);
+      emit();
+      return;
+    }
+    case 'removeAutomation':
+      settings.automations = settings.automations.filter((x) => x.id !== a.id);
+      saveSettings();
+      emit();
+      return;
+    case 'toggleAutomation': {
+      const x = settings.automations.find((y) => y.id === a.id);
+      if (!x) throw new Error('Unknown automation');
+      x.enabled = !!a.enabled;
+      saveSettings();
+      emit();
+      return;
+    }
     case 'quit':
       setTimeout(shutdown, 50);
       return;
     default:
       throw new Error('unknown action');
   }
+}
+
+// ---------------------------------------------------------------- automations
+const toMin = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
+
+// days use JS numbering (0 = Sunday). An interval that crosses midnight (e.g. 22:00 -> 07:00)
+// belongs to the day it STARTS on: Monday 22:00-07:00 runs until Tuesday 07:00.
+function automationActive(a, now) {
+  const day = now.getDay();
+  const m = now.getHours() * 60 + now.getMinutes();
+  const s = toMin(a.start);
+  const e = toMin(a.end);
+  if (s < e) return a.days.includes(day) && m >= s && m < e;
+  return (a.days.includes(day) && m >= s) || (a.days.includes((day + 6) % 7) && m < e);
+}
+
+// First matching automation (list order = priority) decides the automatic status.
+function tickAutomations() {
+  let next = null;
+  if (settings.automationsEnabled) {
+    const now = new Date();
+    for (const a of settings.automations) {
+      if (!a.enabled || !automationActive(a, now)) continue;
+      const st = settings.statuses.find((s) => s.id === a.statusId);
+      if (!st) continue;
+      next = { automationId: a.id, statusId: st.id, text: statusText(st, a.input), until: a.end };
+      break;
+    }
+  }
+  const key = (x) => (x ? `${x.automationId}|${x.text}` : '');
+  const changed = key(next) !== key(autoStatus);
+  autoStatus = next;
+  if (changed) {
+    log(next ? `Automation on: ${next.text} (until ${next.until})` : 'Automation ended');
+    refresh();
+  }
+}
+
+// Every GUI action may change what the automations should do, so re-evaluate after each one.
+async function onAction(a) {
+  await handleAction(a);
+  tickAutomations();
+  emit();
 }
 
 // ---------------------------------------------------------------- window + lifecycle
@@ -279,6 +486,8 @@ process.on('unhandledRejection', (e) => log(`Unhandled: ${e && e.stack || e}`, '
 
 (async () => {
   gui = await startGui({ port: GUI_PORT, getState, onAction });
+  tickAutomations();
+  setInterval(tickAutomations, 15_000);
   openWindow(gui.url);
   client.initialize().catch((e) => { wa.status = 'disconnected'; log(`Failed to start WhatsApp: ${e.message}`, 'error'); });
 })();
