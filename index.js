@@ -1,89 +1,199 @@
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const readline = require('readline');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const { startGui } = require('./gui');
 
-const DEFAULT_ABOUT = process.env.DEFAULT_ABOUT || 'Hey there! I am using WhatsApp.';
-const MIN_INTERVAL_MS = Number(process.env.MIN_INTERVAL_SECONDS || 20) * 1000; // throttle between About updates
-const MAX_LEN = 139;            // WhatsApp About limit
+const BROWSER_PATH = process.env.BROWSER_PATH || 'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe';
+const GUI_PORT = Number(process.env.GUI_PORT || 3737);
+const ABOUT_DURATION = Number(process.env.ABOUT_DURATION || -1); // seconds until About expires, -1 = never
+const MAX_LEN = 139;                  // WhatsApp About limit
+const CLEAR = '\u0000clear';          // sentinel: clear the About text
 
-let ready = false;
-let desired = null;               // what About should currently say (null = nothing to push yet)
-let applied = null;             // what we last actually set
+// ---------------------------------------------------------------- settings (saved to settings.json)
+const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+const DEFAULT_SETTINGS = {
+  idleEnabled: true,
+  idleAfterSeconds: Number(process.env.IDLE_AFTER_SECONDS || 30),
+  minIntervalSeconds: Number(process.env.MIN_INTERVAL_SECONDS || 20),
+  showPlatform: true,
+  defaultBrowserPlatform: process.env.DEFAULT_BROWSER_PLATFORM || '',
+};
+let settings = { ...DEFAULT_SETTINGS };
+try { settings = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch { /* first run */ }
+
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(n)) || lo));
+function applySettings(patch) {
+  if ('idleEnabled' in patch) settings.idleEnabled = !!patch.idleEnabled;
+  if ('showPlatform' in patch) settings.showPlatform = !!patch.showPlatform;
+  if ('idleAfterSeconds' in patch) settings.idleAfterSeconds = clamp(patch.idleAfterSeconds, 5, 3600);
+  // floor of 10s protects the account from looking like a bot
+  if ('minIntervalSeconds' in patch) settings.minIntervalSeconds = clamp(patch.minIntervalSeconds, 10, 600);
+  if ('defaultBrowserPlatform' in patch) settings.defaultBrowserPlatform = String(patch.defaultBrowserPlatform || '').trim().slice(0, 30);
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch { /* not fatal */ }
+}
+
+// ---------------------------------------------------------------- app state
+const wa = { status: 'starting', qr: null }; // starting | qr | authenticating | ready | disconnected
+let enabled = true;                          // master sync switch
+let media = { playing: false };
+let idle = { active: false, message: '' };
+let cleared = false;                         // idle mode off + grace period over -> About cleared
+let desired = null;                          // what About should say (null = nothing to push yet)
+let applied = null;                          // what we last actually set
 let lastSet = 0;
-let timer = null;
+let timer = null;                            // pending About update
+let nextUpdateAt = null;
+let idleTimer = null;
+let shuttingDown = false;
+let gui = null;
+const logs = [];
 
+const show = (t) => (t === CLEAR || t == null ? null : t);
+const emit = () => { if (gui) gui.broadcast(); };
+
+function log(msg, level = 'info') {
+  logs.push({ t: Date.now(), msg, level });
+  if (logs.length > 60) logs.shift();
+  (level === 'error' ? console.error : console.log)(msg);
+  emit();
+}
+
+function getState() {
+  return {
+    wa: { status: wa.status, qr: wa.qr },
+    enabled,
+    media: { playing: !!media.playing, title: media.title || null, artist: media.artist || null, platform: media.platform || null },
+    idle,
+    about: {
+      desired: show(desired), applied: show(applied), hasDesired: desired !== null,
+      pending: desired !== null && desired !== applied, nextUpdateAt,
+    },
+    settings,
+    logs,
+  };
+}
+
+// ---------------------------------------------------------------- WhatsApp
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '.wwebjs_auth') }),
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox'],
-    // Use an installed Chromium-based browser (override with BROWSER_PATH)
-    executablePath: process.env.BROWSER_PATH || 'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-  },
+  puppeteer: { headless: true, args: ['--no-sandbox'], executablePath: BROWSER_PATH },
 });
 
-client.on('qr', (qr) => {
-  console.log('Scan this QR with WhatsApp > Linked devices:');
-  qrcode.generate(qr, { small: true });
+client.on('qr', async (qr) => {
+  wa.status = 'qr';
+  try { wa.qr = await QRCode.toDataURL(qr, { margin: 1, width: 320 }); } catch (e) { log(`QR error: ${e.message}`, 'error'); }
+  emit();
 });
-client.on('ready', () => { ready = true; console.log('WhatsApp ready.'); schedule(); });
-client.on('auth_failure', (m) => console.error('Auth failure:', m));
-client.on('disconnected', (r) => { ready = false; console.error('Disconnected:', r); });
+client.on('authenticated', () => { wa.status = 'authenticating'; wa.qr = null; emit(); });
+client.on('ready', () => { wa.status = 'ready'; wa.qr = null; log('WhatsApp connected'); schedule(); emit(); });
+client.on('auth_failure', (m) => { wa.status = 'disconnected'; log(`Auth failure: ${m}`, 'error'); });
+client.on('disconnected', (r) => { wa.status = 'disconnected'; log(`Disconnected: ${r}`, 'error'); });
 
-// WhatsApp replaced the old About setter (setMyStatus) with "text status".
+// WhatsApp replaced the old About setter (setMyStatus) with "text status":
 // setTextStatus(text, emoji, durationSeconds): duration -1 = never expires, all null = clear.
-const ABOUT_DURATION = Number(process.env.ABOUT_DURATION || -1);
-
 async function setAbout(text) {
-  const isDefault = text === DEFAULT_ABOUT;
+  const clear = text === CLEAR;
   const res = await client.pupPage.evaluate(async (text, clear, duration) => {
     const bridge = window.require('WAWebContactTextStatusBridge');
     if (bridge && typeof bridge.setTextStatus === 'function') {
-      const r = clear
-        ? await bridge.setTextStatus(null, null, null)
-        : await bridge.setTextStatus(text, null, duration);
+      const r = clear ? await bridge.setTextStatus(null, null, null) : await bridge.setTextStatus(text, null, duration);
       return { via: 'textStatus', result: r && r.result };
     }
     return { via: 'none' };
-  }, text, isDefault, ABOUT_DURATION);
+  }, text, clear, ABOUT_DURATION);
 
-  if (res.via === 'none') return client.setStatus(text); // old WhatsApp Web versions
+  if (res.via === 'none') return clear ? client.setStatus('') : client.setStatus(text); // old WhatsApp Web versions
   if (res.result !== 'SUCCESS') throw new Error(`text status update returned ${res.result}`);
 }
 
-function format({ playing, title, artist, platform }) {
-  const song = `🎵 ${artist ? artist + ' - ' : ''}${title}`;
-  const suffix = platform ? ` - ${platform}` : '';
-  // Truncate the song part so the platform is always kept
-  const room = MAX_LEN - suffix.length;
-  return (song.length > room ? song.slice(0, room - 1) + '…' : song) + suffix;
-}
-
 function schedule() {
-  if (!ready || desired === null || desired === applied || timer) return;
-  const wait = Math.max(0, lastSet + MIN_INTERVAL_MS - Date.now());
+  if (wa.status !== 'ready' || desired === null || desired === applied || timer) return;
+  const wait = Math.max(0, lastSet + settings.minIntervalSeconds * 1000 - Date.now());
+  nextUpdateAt = Date.now() + wait;
   timer = setTimeout(async () => {
-    timer = null;
+    timer = null; nextUpdateAt = null;
     const text = desired; // always apply the latest value, skipping intermediate tracks
     try {
       await setAbout(text);
       applied = text;
-      lastSet = Date.now();
-      console.log('About ->', text);
+      log(text === CLEAR ? 'About cleared' : `About → ${text}`);
     } catch (e) {
-      console.error('setStatus failed:', e.message);
-      lastSet = Date.now();
+      log(`Update failed: ${e.message}`, 'error');
     }
+    lastSet = Date.now();
     schedule();
+    emit();
   }, wait);
+  emit();
+}
+
+// ---------------------------------------------------------------- what About should say
+function format({ title, artist, platform }) {
+  const song = `🎵 ${artist ? artist + ' - ' : ''}${title}`;
+  const suffix = settings.showPlatform && platform ? ` - ${platform}` : '';
+  const room = MAX_LEN - suffix.length; // truncate the song so the platform is always kept
+  return (song.length > room ? song.slice(0, room - 1) + '…' : song) + suffix;
+}
+
+function idleText(msg) {
+  const text = `🌙 Idle${msg ? ' - ' + msg : ''}`;
+  return text.length > MAX_LEN ? text.slice(0, MAX_LEN - 1) + '…' : text;
+}
+
+function computeDesired() {
+  if (!enabled) return CLEAR;
+  if (idle.active) return idleText(idle.message);
+  if (media.playing && media.title) return format(media);
+  if (cleared) return CLEAR;
+  return null; // grace period: keep whatever is showing
+}
+
+function refresh() {
+  const d = computeDesired();
+  if (d !== null) desired = d;
+  schedule();
+  emit();
+}
+
+// Never show a browser name as the platform. If the site can't be read from the tab titles,
+// reuse the last site seen, else the "default browser platform" setting, else omit it.
+const BROWSER_NAMES = new Set(['Brave', 'Chrome', 'Edge', 'Firefox', 'Opera', 'Vivaldi']);
+let lastSite = null;
+function resolvePlatform(platform) {
+  if (!platform) return null;
+  if (!BROWSER_NAMES.has(platform)) { if (platform !== 'YouTube') lastSite = platform; return platform; }
+  return lastSite || settings.defaultBrowserPlatform || null;
+}
+
+// ---------------------------------------------------------------- media + idle
+function onGraceOver() {
+  idleTimer = null;
+  if (settings.idleEnabled) { idle = { active: true, message: '' }; log('You\'re idle'); }
+  else cleared = true;
+  refresh();
+}
+
+function onMedia(state) {
+  if (state.playing && state.title) {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    idle = { active: false, message: '' };
+    cleared = false;
+    const isNew = !media.playing || media.title !== state.title || media.artist !== state.artist;
+    media = { ...state, platform: resolvePlatform(state.platform) };
+    if (isNew) log(`Now playing: ${state.artist ? state.artist + ' - ' : ''}${state.title}`);
+  } else {
+    media = { playing: false };
+    // keep showing the last song briefly (e.g. between tracks) before going idle
+    if (!idle.active && !cleared && !idleTimer) idleTimer = setTimeout(onGraceOver, settings.idleAfterSeconds * 1000);
+  }
+  refresh();
 }
 
 // Media watcher: PowerShell helper emits a JSON line on every change.
-const ps = spawn('powershell.exe', [
-  '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'smtc.ps1'),
-]);
+const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'smtc.ps1')], { windowsHide: true });
 let buf = '';
 ps.stdout.setEncoding('utf8');
 ps.stdout.on('data', (chunk) => {
@@ -98,87 +208,77 @@ ps.stdout.on('data', (chunk) => {
     onMedia(state);
   }
 });
+ps.stderr.on('data', (d) => log(`[media] ${d.toString().trim()}`, 'error'));
 
-// --- Idle mode: nothing playing for IDLE_AFTER_MS -> "🌙 Idle - <message you type>" ---
-const IDLE_AFTER_MS = Number(process.env.IDLE_AFTER_SECONDS || 30) * 1000;
-let idleActive = false;
-let idleTimer = null;
-let idleAbort = null;
-
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-rl.on('SIGINT', shutdown); // readline swallows Ctrl+C otherwise
-
-function idleText(msg) {
-  const text = `🌙 Idle${msg ? ' - ' + msg : ''}`;
-  return text.length > MAX_LEN ? text.slice(0, MAX_LEN - 1) + '…' : text;
+// ---------------------------------------------------------------- actions from the GUI
+async function onAction(a) {
+  switch (a && a.type) {
+    case 'setIdleMessage': {
+      if (!idle.active) throw new Error('You\'re not idle right now');
+      idle.message = String(a.message || '').trim().slice(0, 100);
+      refresh();
+      return;
+    }
+    case 'setEnabled':
+      enabled = !!a.value;
+      log(enabled ? 'Sync on' : 'Sync paused (About cleared)');
+      refresh();
+      return;
+    case 'updateSettings': {
+      applySettings(a.settings || {});
+      if (!settings.idleEnabled && idle.active) { idle = { active: false, message: '' }; cleared = true; }
+      else if (settings.idleEnabled && cleared && !media.playing) { cleared = false; idle = { active: true, message: '' }; }
+      refresh();
+      return;
+    }
+    case 'quit':
+      setTimeout(shutdown, 50);
+      return;
+    default:
+      throw new Error('unknown action');
+  }
 }
 
-function startIdle() {
-  idleTimer = null;
-  idleActive = true;
-  desired = idleText('');
-  console.log('Idle:', desired);
-  schedule();
-
-  // Ask for the message. If you're away it just stays "🌙 Idle" until you answer.
+// ---------------------------------------------------------------- window + lifecycle
+let win = null;
+function openWindow(url) {
+  if (process.env.NO_WINDOW) { log(`GUI at ${url}`); return; }
+  const started = Date.now();
   try {
-    idleAbort = new AbortController();
-    rl.question('\n🌙 You\'re idle - message to show? (Enter to skip): ', { signal: idleAbort.signal }, (answer) => {
-      idleAbort = null;
-      const msg = answer.trim();
-      if (!idleActive || !msg) return;
-      desired = idleText(msg);
-      console.log('Idle:', desired);
-      schedule();
+    win = spawn(BROWSER_PATH, [
+      `--app=${url}`,
+      `--user-data-dir=${path.join(os.tmpdir(), 'whatsapp-rpc-window')}`,
+      '--window-size=480,860', '--no-first-run', '--no-default-browser-check',
+    ], { stdio: 'ignore' });
+    win.on('error', (e) => log(`Couldn't open window (${e.message}). Open ${url} in a browser.`, 'error'));
+    win.on('exit', () => {
+      if (shuttingDown) return;
+      if (Date.now() - started > 3000) shutdown(); // window closed -> quit (and clear About)
+      else log(`Window launcher exited early. Open ${url} in a browser.`, 'error');
     });
-  } catch (e) {
-    // stdin closed / no terminal: still go idle, just without a custom message
-    idleAbort = null;
-    console.error('Cannot ask for an idle message:', e.message);
-  }
+  } catch (e) { log(`Couldn't open window: ${e.message}`, 'error'); }
 }
-
-function endIdle() {
-  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
-  if (idleAbort) { idleAbort.abort(); idleAbort = null; console.log(); } // drop an unanswered prompt
-  idleActive = false;
-}
-
-// Never show a browser name as the platform. If the site can't be read from the window title
-// (music tab in the background), reuse the last site seen, else DEFAULT_BROWSER_PLATFORM, else omit it.
-const BROWSER_NAMES = new Set(['Brave', 'Chrome', 'Edge', 'Firefox', 'Opera', 'Vivaldi']);
-let lastSite = process.env.DEFAULT_BROWSER_PLATFORM || null;
-
-function resolvePlatform(platform) {
-  if (!platform) return null;
-  if (!BROWSER_NAMES.has(platform)) { if (platform !== 'YouTube') lastSite = platform; return platform; }
-  return lastSite;
-}
-
-function onMedia(state) {
-  if (state.playing && state.title) {
-    endIdle();
-    state.platform = resolvePlatform(state.platform);
-    desired = format(state);
-    console.log('Detected:', desired);
-    schedule();
-  } else if (!idleActive && !idleTimer) {
-    // keep showing the last song briefly (e.g. between tracks) before going idle
-    idleTimer = setTimeout(startIdle, IDLE_AFTER_MS);
-  }
-}
-ps.stderr.on('data', (d) => console.error('[smtc]', d.toString().trim()));
 
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   ps.kill();
-  try { if (ready) await setAbout(DEFAULT_ABOUT); } catch {}
-  try { await client.destroy(); } catch {}
+  try {
+    if (wa.status === 'ready') await Promise.race([setAbout(CLEAR), new Promise((r) => setTimeout(r, 8000))]);
+  } catch { /* best effort */ }
+  try { await client.destroy(); } catch { /* ignore */ }
+  if (win && win.pid) { try { spawn('taskkill', ['/PID', String(win.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* ignore */ } }
+  if (gui) gui.close();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 // Never die silently: a crash would leave the last song on your About forever.
-process.on('uncaughtException', (e) => console.error('Uncaught:', e));
-process.on('unhandledRejection', (e) => console.error('Unhandled:', e));
+process.on('uncaughtException', (e) => log(`Uncaught: ${e && e.stack || e}`, 'error'));
+process.on('unhandledRejection', (e) => log(`Unhandled: ${e && e.stack || e}`, 'error'));
 
-client.initialize();
+(async () => {
+  gui = await startGui({ port: GUI_PORT, getState, onAction });
+  openWindow(gui.url);
+  client.initialize().catch((e) => { wa.status = 'disconnected'; log(`Failed to start WhatsApp: ${e.message}`, 'error'); });
+})();

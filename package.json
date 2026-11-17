@@ -6,12 +6,20 @@
   "scripts": {
     "start": "node index.js"
   },
-  "keywords": ["whatsapp", "rich-presence", "now-playing", "spotify", "windows"],
+  "keywords": [
+    "whatsapp",
+    "rich-presence",
+    "now-playing",
+    "spotify",
+    "windows"
+  ],
   "license": "MIT",
   "type": "commonjs",
-  "os": ["win32"],
+  "os": [
+    "win32"
+  ],
   "dependencies": {
-    "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.4",
     "whatsapp-web.js": "^1.34.8"
   }
 }

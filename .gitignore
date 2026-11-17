@@ -12,3 +12,6 @@ npm-debug.log*
 .env.*
 .DS_Store
 Thumbs.db
+
+# local GUI settings
+settings.json
